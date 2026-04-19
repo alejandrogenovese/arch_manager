@@ -1,0 +1,2 @@
+# Las revisiones de Alembic se generan acá con:
+#   alembic revision --autogenerate -m "descripcion"

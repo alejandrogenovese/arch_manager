@@ -1,0 +1,21 @@
+Migraciones de base de datos — Alembic.
+
+En v1 (Render demo) NO se usa: el lifespan de FastAPI llama a
+Base.metadata.create_all() para arrancar más rápido.
+
+Para producción real (OCP) seguir este flujo:
+
+  1. Configurar DATABASE_URL en el shell:
+        export DATABASE_URL=postgresql+psycopg://user:pass@host:5432/db
+
+  2. Generar la baseline (una sola vez):
+        cd apps/bff
+        alembic revision --autogenerate -m "baseline"
+
+  3. Comentar la llamada a Base.metadata.create_all() en app/main.py
+
+  4. En cada release, antes del rollout del Deployment:
+        alembic upgrade head
+
+  5. En OCP, esto se hace típicamente como un Job o un initContainer
+     del Deployment (ver README principal del repo).
