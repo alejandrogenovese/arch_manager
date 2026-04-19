@@ -2,6 +2,7 @@
 Entrypoint del BFF v2.
 """
 import logging
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -16,37 +17,98 @@ from app.routers import attachments, audit, auth, docs, health, users
 from app.seed import run_seed
 
 settings = get_settings()
-logging.basicConfig(level=settings.log_level)
+
+# Logging EXPLÍCITO: handler de stdout con flush inmediato. Sin esto, en
+# Render, si el proceso muere durante el lifespan startup, los logs se
+# pierden y solo ves "Exited with status 3" sin traceback.
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(logging.Formatter(
+    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+))
+# Ojo: configurar el root logger, no crear uno nuevo.
+root = logging.getLogger()
+root.handlers[:] = [_handler]  # reemplazamos los handlers heredados
+root.setLevel(settings.log_level)
 log = logging.getLogger("arch-manager")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Migraciones: si AUTO_MIGRATE=true, corremos alembic upgrade head
-    # antes que cualquier otra cosa. Es la forma más simple para Render
-    # (no tenés shell confiable en el free tier). En OCP se usa un
-    # initContainer dedicado y se pone AUTO_MIGRATE=false.
-    if settings.auto_migrate:
-        try:
-            from alembic import command
-            from alembic.config import Config
-            alembic_cfg = Config("alembic.ini")
-            alembic_cfg.set_main_option("sqlalchemy.url", settings.database_url)
-            command.upgrade(alembic_cfg, "head")
-            log.info("Alembic: migraciones aplicadas")
-        except Exception as exc:  # noqa: BLE001
-            # No queremos tirar la app si alembic falla por un motivo tonto
-            # (ej: primera vez que corre sobre tablas creadas con create_all).
-            # La idempotencia de Alembic ya evita doble-aplicar.
-            log.warning("Alembic falló, continúo con create_all: %s", exc)
+    try:
+        # 1. create_all() — crea tablas NUEVAS si no existen. Sobre tablas
+        #    existentes no hace nada. Idempotente.
+        log.info("Startup: creando/verificando schema base…")
+        Base.metadata.create_all(bind=engine)
+        log.info("Startup: schema base OK")
 
-    Base.metadata.create_all(bind=engine)
-    log.info("Schema verificado/creado")
+        # 2. Migración idempotente con SQL raw. No depende de Alembic
+        #    (que queda como utilitario para OCP/dev local).
+        #    Todos los ALTER usan IF NOT EXISTS — seguros incluso si corren
+        #    muchas veces o sobre DB virgen.
+        if settings.auto_migrate:
+            from sqlalchemy import text
+            log.info("Startup: aplicando migraciones v2…")
+            with engine.begin() as conn:
+                dialect = engine.dialect.name
+                if dialect == "postgresql":
+                    conn.execute(text(
+                        "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+                        "must_change_password BOOLEAN NOT NULL DEFAULT FALSE"
+                    ))
+                    conn.execute(text(
+                        "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+                        "temp_password_expires_at TIMESTAMPTZ"
+                    ))
+                    conn.execute(text(
+                        "ALTER TABLE users ADD COLUMN IF NOT EXISTS "
+                        "last_login_at TIMESTAMPTZ"
+                    ))
+                    conn.execute(text(
+                        "ALTER TABLE documents ADD COLUMN IF NOT EXISTS "
+                        "deleted_at TIMESTAMPTZ"
+                    ))
+                    conn.execute(text(
+                        "CREATE INDEX IF NOT EXISTS ix_documents_deleted_at "
+                        "ON documents(deleted_at)"
+                    ))
+                    conn.execute(text(
+                        "ALTER TABLE attachments ADD COLUMN IF NOT EXISTS "
+                        "deleted_at TIMESTAMPTZ"
+                    ))
+                    # Migrar rol 'plataforma' → 'tech_lead' (sin efecto si no existe)
+                    result = conn.execute(text(
+                        "UPDATE users SET role = 'tech_lead' "
+                        "WHERE role = 'plataforma'"
+                    ))
+                    if result.rowcount:
+                        log.info("Migrados %d usuarios de plataforma → tech_lead",
+                                 result.rowcount)
+                else:
+                    log.info("Dialecto %s: migraciones v2 sólo aplican en Postgres",
+                             dialect)
+            log.info("Startup: migraciones v2 OK")
 
-    if settings.seed_on_startup:
-        with SessionLocal() as db:
-            run_seed(db)
-        log.info("Seed ejecutado (idempotente)")
+        # 3. Seed (idempotente — no hace nada si ya hay usuarios)
+        if settings.seed_on_startup:
+            log.info("Startup: ejecutando seed…")
+            with SessionLocal() as db:
+                run_seed(db)
+            log.info("Startup: seed OK")
+
+        log.info("Startup completo — listo para recibir tráfico")
+
+    except Exception:
+        # Imprimimos el traceback a stdout DIRECTO para que Render lo vea
+        # antes de que uvicorn mate el proceso. Sin esto, los logs del
+        # lifespan fallido se pierden y solo ves "Exited with status 3".
+        import traceback
+        print("\n" + "=" * 70, flush=True)
+        print("FATAL en lifespan startup:", flush=True)
+        traceback.print_exc()
+        print("=" * 70 + "\n", flush=True)
+        sys.stdout.flush()
+        sys.stderr.flush()
+        raise
 
     yield
 
