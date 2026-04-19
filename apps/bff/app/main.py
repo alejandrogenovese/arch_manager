@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine
-from app.routers import attachments, audit, auth, docs, health, users
+from app.routers import attachments, audit, auth, bootstrap, docs, health, users
 from app.seed import run_seed
 
 settings = get_settings()
@@ -131,6 +131,7 @@ app.include_router(docs.router, prefix="/api")
 app.include_router(attachments.router, prefix="/api")
 app.include_router(users.router, prefix="/api")
 app.include_router(audit.router, prefix="/api")
+app.include_router(bootstrap.router, prefix="/api")
 
 # SPA
 spa_dist = Path(settings.spa_dist_dir)
