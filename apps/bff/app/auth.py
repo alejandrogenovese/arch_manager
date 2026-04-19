@@ -1,13 +1,15 @@
 """
-Sesiones server-side firmadas + helpers de auth.
+Sesiones server-side firmadas + helpers de auth — v2.
 
-Patrón BFF estándar:
-- El navegador solo lleva una cookie HttpOnly + SameSite con el session id firmado.
-- El payload de sesión vive en la tabla `sessions` (DB).
-- Cuando se enchufe Entra ID, el flow OIDC code-with-PKCE termina creando esta
-  misma sesión server-side; el resto del backend no cambia.
+Novedades:
+  - Helpers para generar password temporal (expira en 72h).
+  - Dependency `current_user_allow_pw_change` para endpoints que deben
+    funcionar aún con must_change_password=True (solo change-password).
+  - current_user estándar bloquea (423) si must_change_password=True —
+    fuerza al cliente a completar el cambio antes de navegar.
 """
 import secrets
+import string
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
@@ -24,13 +26,10 @@ from app.schemas import UserOut
 
 settings = get_settings()
 
-# itsdangerous: firma el session id que viaja en la cookie.
 _serializer = URLSafeTimedSerializer(settings.session_secret, salt="arch-mgr-session")
 
-# bcrypt directo (sin passlib) — estándar bancario, costo 12 por defecto.
-# bcrypt limita a 72 bytes; truncamos defensivamente para que passwords
-# largos no exploten en lugar de fallar silenciosamente.
 _BCRYPT_MAX = 72
+TEMP_PW_TTL_HOURS = 72
 
 
 def _to_bytes(pw: str) -> bytes:
@@ -48,12 +47,27 @@ def verify_password(pw: str, hashed: str) -> bool:
         return False
 
 
+def generate_temp_password(length: int = 14) -> str:
+    """Password temporal con minúsculas, mayúsculas y dígitos (sin símbolos raros)."""
+    alphabet = string.ascii_letters + string.digits
+    pw_chars = [
+        secrets.choice(string.ascii_lowercase),
+        secrets.choice(string.ascii_uppercase),
+        secrets.choice(string.digits),
+    ] + [secrets.choice(alphabet) for _ in range(length - 3)]
+    secrets.SystemRandom().shuffle(pw_chars)
+    return "".join(pw_chars)
+
+
+def temp_pw_expiry() -> datetime:
+    return datetime.now(timezone.utc) + timedelta(hours=TEMP_PW_TTL_HOURS)
+
+
 def _new_sid() -> str:
     return secrets.token_urlsafe(32)
 
 
 def issue_session(db: Session, user: User, response: Response) -> SessionRow:
-    """Crea una sesión en DB y setea la cookie firmada en la response."""
     sid = _new_sid()
     expires = datetime.now(timezone.utc) + timedelta(hours=settings.session_max_age_hours)
     row = SessionRow(id=sid, user_id=user.id, expires_at=expires)
@@ -67,7 +81,7 @@ def issue_session(db: Session, user: User, response: Response) -> SessionRow:
         max_age=settings.session_max_age_hours * 3600,
         httponly=True,
         secure=settings.session_cookie_secure,
-        samesite="lax",   # Lax + same-origin (BFF + SPA juntos) = anti-CSRF razonable v1
+        samesite="lax",
         path="/",
     )
     return row
@@ -79,26 +93,27 @@ def revoke_session(db: Session, sid: str, response: Response) -> None:
     response.delete_cookie(settings.session_cookie_name, path="/")
 
 
+def revoke_all_user_sessions(db: Session, user_id: str, except_sid: str | None = None) -> int:
+    """Invalida todas las sesiones de un usuario. Se llama al cambiar password."""
+    q = db.query(SessionRow).filter(SessionRow.user_id == user_id)
+    if except_sid:
+        q = q.filter(SessionRow.id != except_sid)
+    count = q.delete()
+    db.commit()
+    return count
+
+
 def _decode_sid(signed_value: str) -> str | None:
     try:
-        return _serializer.loads(
-            signed_value,
-            max_age=settings.session_max_age_hours * 3600,
-        )
+        return _serializer.loads(signed_value, max_age=settings.session_max_age_hours * 3600)
     except (BadSignature, SignatureExpired):
         return None
 
 
-# ─── FastAPI dependencies ────────────────────────────────────────────────────
-
 CookieDep = Annotated[str | None, Cookie(alias=settings.session_cookie_name)]
 
 
-def get_current_session(
-    raw_cookie: CookieDep = None,
-    db: Session = Depends(get_db),
-) -> tuple[User, SessionRow]:
-    """Resuelve la sesión actual o lanza 401."""
+def _resolve_session(raw_cookie: str | None, db: Session) -> tuple[User, SessionRow]:
     if not raw_cookie:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "No session")
 
@@ -110,7 +125,6 @@ def get_current_session(
     if not row:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Session not found")
 
-    # SQLite no preserva tzinfo en DateTime(timezone=True); normalizamos.
     expires_at = row.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -123,17 +137,36 @@ def get_current_session(
     if not user:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User inactive")
 
-    # touch
     row.last_seen_at = datetime.now(timezone.utc)
     db.commit()
-
     return user, row
+
+
+def get_current_session(
+    raw_cookie: CookieDep = None,
+    db: Session = Depends(get_db),
+) -> tuple[User, SessionRow]:
+    return _resolve_session(raw_cookie, db)
+
+
+def current_user_allow_pw_change(
+    session: Annotated[tuple[User, SessionRow], Depends(get_current_session)],
+) -> User:
+    """Permite operar aunque must_change_password=True. Solo para change-password."""
+    return session[0]
 
 
 def current_user(
     session: Annotated[tuple[User, SessionRow], Depends(get_current_session)],
 ) -> User:
-    return session[0]
+    """Bloquea (423) si el usuario debe cambiar password."""
+    user, _ = session
+    if user.must_change_password:
+        raise HTTPException(
+            status.HTTP_423_LOCKED,
+            "Debés cambiar tu contraseña antes de continuar.",
+        )
+    return user
 
 
 def to_user_out(user: User) -> UserOut:
@@ -143,17 +176,23 @@ def to_user_out(user: User) -> UserOut:
         name=user.full_name,
         role=user.role,  # type: ignore[arg-type]
         permissions=sorted(perms_for(user.role)),  # type: ignore[arg-type]
+        must_change_password=user.must_change_password,
     )
 
 
 def require_perm(*needed: str):
-    """Dependency factory: requiere alguno de los permisos."""
     def _dep(user: Annotated[User, Depends(current_user)]) -> User:
         granted = perms_for(user.role)  # type: ignore[arg-type]
         if not any(p in granted for p in needed):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "Forbidden")
         return user
     return _dep
+
+
+def require_admin(user: Annotated[User, Depends(current_user)]) -> User:
+    if user.role != "admin":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo administradores")
+    return user
 
 
 def client_ip(request: Request) -> str:

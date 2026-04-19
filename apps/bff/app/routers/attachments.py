@@ -1,19 +1,10 @@
 """
-Router de adjuntos.
-- POST /docs/{doc_id}/attachments  → multipart upload
-- GET  /attachments/{att_id}        → stream del binario (private)
-- DELETE /attachments/{att_id}      → elimina
-
-Límite de tamaño: 8 MB por archivo (igual al mock original).
-
-TODO[storage]: cuando se externalice a S3 (p.ej. bucket
-  arch-manager-attachments), reemplazar bytea por storage_key + signed URL.
-  El contrato de la API no cambia: el cliente sigue viendo `url` en el JSON.
+Router de adjuntos v2 — ahora respeta soft delete.
 """
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.audit import log as audit_log
@@ -47,7 +38,7 @@ async def upload_attachment(
     db: Session = Depends(get_db),
 ) -> dict:
     doc = db.query(Document).filter(Document.id == doc_id).one_or_none()
-    if not doc:
+    if not doc or doc.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Documento no encontrado")
 
     if not can_edit_doc(user.role, user.id, doc.author_id):  # type: ignore[arg-type]
@@ -75,22 +66,24 @@ async def upload_attachment(
     db.refresh(att)
 
     return {
-        "id": att.id,
-        "name": att.filename,
-        "mime": att.mime,
-        "size": att.size_bytes,
-        "url": f"/api/attachments/{att.id}",
+        "id": att.id, "name": att.filename, "mime": att.mime,
+        "size": att.size_bytes, "url": f"/api/attachments/{att.id}",
     }
 
 
 @router.get("/attachments/{att_id}")
 def get_attachment(
     att_id: str,
-    _user: Annotated[User, Depends(current_user)],
+    user: Annotated[User, Depends(current_user)],
     db: Session = Depends(get_db),
 ) -> Response:
     att = db.query(Attachment).filter(Attachment.id == att_id).one_or_none()
-    if not att:
+    if not att or att.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Adjunto no encontrado")
+
+    # Si el doc padre está soft-deleted, solo admin puede bajarlo
+    doc = db.query(Document).filter(Document.id == att.doc_id).one_or_none()
+    if doc and doc.deleted_at is not None and user.role != "admin":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Adjunto no encontrado")
 
     headers = {

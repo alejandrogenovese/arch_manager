@@ -56,7 +56,10 @@ export const ARTIFACT_TEMPLATES = {
 
 export const ROLE_LABELS = {
   arq_datos:  'Arquitecto de Datos',
-  plataforma: 'Plataforma',
+  arq_lead:   'Arquitecto Líder',
   tech_lead:  'Tech Lead',
   admin:      'Admin',
+  dm:         'Delivery Manager',
 }
+
+export const ALL_ROLES = ['arq_datos', 'arq_lead', 'tech_lead', 'admin', 'dm']

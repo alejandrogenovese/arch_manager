@@ -1,18 +1,5 @@
 """
-Entrypoint del BFF.
-
-Estructura de URLs:
-  /healthz, /readyz                  → liveness/readiness (probes)
-  /api/auth/{login,logout,me}        → auth
-  /api/docs/...                       → CRUD + transición de docs
-  /api/docs/{id}/attachments          → upload
-  /api/attachments/{id}               → download
-  /                                    → SPA (en prod) o redirect a Vite (en dev)
-
-Diseño BFF:
-  - Cookie HttpOnly + SameSite=Lax con session id firmado.
-  - SPA y BFF se sirven desde el MISMO origin → no hay CORS en prod.
-  - En dev (SPA en :5173, BFF en :8000) se habilita CORS con credentials.
+Entrypoint del BFF v2.
 """
 import logging
 from contextlib import asynccontextmanager
@@ -22,11 +9,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from sqlalchemy import inspect
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine
-from app.routers import attachments, auth, docs, health
+from app.routers import attachments, audit, auth, docs, health, users
 from app.seed import run_seed
 
 settings = get_settings()
@@ -36,8 +22,24 @@ log = logging.getLogger("arch-manager")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # En v1 creamos schema con Base.metadata para arrancar rápido.
-    # Para producción real: usar `alembic upgrade head` antes de arrancar el pod.
+    # Migraciones: si AUTO_MIGRATE=true, corremos alembic upgrade head
+    # antes que cualquier otra cosa. Es la forma más simple para Render
+    # (no tenés shell confiable en el free tier). En OCP se usa un
+    # initContainer dedicado y se pone AUTO_MIGRATE=false.
+    if settings.auto_migrate:
+        try:
+            from alembic import command
+            from alembic.config import Config
+            alembic_cfg = Config("alembic.ini")
+            alembic_cfg.set_main_option("sqlalchemy.url", settings.database_url)
+            command.upgrade(alembic_cfg, "head")
+            log.info("Alembic: migraciones aplicadas")
+        except Exception as exc:  # noqa: BLE001
+            # No queremos tirar la app si alembic falla por un motivo tonto
+            # (ej: primera vez que corre sobre tablas creadas con create_all).
+            # La idempotencia de Alembic ya evita doble-aplicar.
+            log.warning("Alembic falló, continúo con create_all: %s", exc)
+
     Base.metadata.create_all(bind=engine)
     log.info("Schema verificado/creado")
 
@@ -49,9 +51,8 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Arch Manager BFF", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="Arch Manager BFF", version="1.1.0", lifespan=lifespan)
 
-# CORS solo cuando el SPA corre separado (dev local con Vite).
 if settings.env == "development":
     app.add_middleware(
         CORSMiddleware,
@@ -66,37 +67,30 @@ app.include_router(health.router)
 app.include_router(auth.router, prefix="/api")
 app.include_router(docs.router, prefix="/api")
 app.include_router(attachments.router, prefix="/api")
+app.include_router(users.router, prefix="/api")
+app.include_router(audit.router, prefix="/api")
 
-
-# ─── SPA ─────────────────────────────────────────────────────────────────────
-# En producción servimos los estáticos del build de Vite desde el mismo proceso
-# (1 contenedor, mismo origin, sin CORS, sesión cookie limpia).
-
+# SPA
 spa_dist = Path(settings.spa_dist_dir)
 
 if settings.serve_spa and spa_dist.exists():
-    # Sirve assets de Vite (/assets/*) con caching agresivo.
     assets_dir = spa_dist / "assets"
     if assets_dir.exists():
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
 
-    # Sirve cualquier otro estático en raíz (favicon, logo, etc.)
     @app.get("/{path:path}", include_in_schema=False)
     async def spa_fallback(path: str) -> FileResponse:
-        # Si el archivo existe físicamente en el dist, servirlo.
         candidate = spa_dist / path
         if path and candidate.is_file():
             return FileResponse(candidate)
-        # SPA fallback: devolvemos index.html para que React Router decida.
-        index = spa_dist / "index.html"
-        return FileResponse(index)
+        return FileResponse(spa_dist / "index.html")
 else:
     log.warning(
         "SPA dist no encontrado en %s — el BFF corre solo. "
-        "En dev, levantá el SPA con `npm run dev` (Vite en :5173).",
+        "En dev, levantá el SPA con `npm run dev`.",
         settings.spa_dist_dir,
     )
 
     @app.get("/", include_in_schema=False)
     async def root() -> dict:
-        return {"app": "Arch Manager BFF", "env": settings.env, "spa": "no servido"}
+        return {"app": "Arch Manager BFF", "env": settings.env, "version": "1.1.0"}

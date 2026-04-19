@@ -28,6 +28,12 @@ class Settings(BaseSettings):
     seed_on_startup: bool = True
     seed_default_password: str = "galicia123"
 
+    # Migraciones automáticas al arrancar (True en Render, False en OCP)
+    auto_migrate: bool = True
+
+    # Password temporal (cuando admin crea usuario o resetea)
+    temp_password_ttl_hours: int = 72
+
     # Static (SPA)
     serve_spa: bool = True
     spa_dist_dir: str = "/app/web_dist"

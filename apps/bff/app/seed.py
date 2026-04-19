@@ -1,5 +1,5 @@
 """
-Seed inicial — usuarios y documentos del mock original.
+Seed inicial v2 — usuarios con 5 roles nuevos + 9 docs del mock.
 Idempotente: solo inserta si no hay datos.
 """
 from datetime import datetime, timezone
@@ -12,14 +12,17 @@ from app.models import Document, User
 
 settings = get_settings()
 
-
+# Usuarios iniciales — todos con la misma password del seed, must_change_password=False
+# (para demo). En producción real, admin debe tener must_change_password=True tras
+# el primer login.
 SEED_USERS = [
     # username, full_name, role
     ("fgarcia",   "Fernando García",   "arq_datos"),
     ("lmartinez", "Lucía Martínez",    "arq_datos"),
-    ("cruiz",     "Carlos Ruiz",       "plataforma"),
+    ("alead",     "Ana Arq-Lead",      "arq_lead"),
+    ("tlead",     "Tomás Tech-Lead",   "tech_lead"),
+    ("dmanager",  "Diego Manager",     "dm"),
     ("admin",     "Admin",             "admin"),
-    ("tlead",     "Tech Lead",         "tech_lead"),
 ]
 
 SEED_DOCS = [
@@ -38,10 +41,10 @@ SEED_DOCS = [
         "title": "ADR-001 — Apache Iceberg como formato en Bronze/Silver",
         "author": "fgarcia", "domain": "Storage",
         "sections": {
-            "context": "Necesitamos un formato de tabla open-source con soporte ACID para el lakehouse. La decisión impacta en el catálogo, los engines de query y la estrategia de time-travel.",
+            "context": "Necesitamos un formato de tabla open-source con soporte ACID para el lakehouse.",
             "options": "Opción A: Apache Iceberg\nOpción B: Delta Lake\nOpción C: Apache Hudi",
-            "decision": "Apache Iceberg — mayor compatibilidad con ecosistema open-source (Spark, Flink, Trino, DuckDB), soporte multi-engine sin vendor lock-in, REST Catalog maduro.",
-            "consequences": "Requiere Iceberg REST Catalog (Polaris o Gravitino). Dependencia de AWS Glue Data Catalog para metadata. Revisión en 12 meses.",
+            "decision": "Apache Iceberg — mayor compatibilidad con ecosistema open-source (Spark, Flink, Trino, DuckDB).",
+            "consequences": "Requiere Iceberg REST Catalog. Dependencia de AWS Glue Data Catalog para metadata.",
         },
     },
     {
@@ -49,9 +52,9 @@ SEED_DOCS = [
         "title": "ADR-002 — OBT en Platinum para serving",
         "author": "lmartinez", "domain": "Storage",
         "sections": {
-            "context": "La capa de serving (Platinum) necesita latencia <10ms para consultas analíticas de producto. Los modelos relacionales en Gold generan JOINs costosos.",
-            "decision": "One Big Table (OBT) desnormalizado en Platinum. Trade-off aceptado: mayor storage a cambio de latencia de serving predecible.",
-            "consequences": "Incremento estimado de 30% en storage. Pipeline de materialización requerido. No apto para datos con actualizaciones frecuentes.",
+            "context": "La capa de serving (Platinum) necesita latencia <10ms.",
+            "decision": "One Big Table (OBT) desnormalizado en Platinum.",
+            "consequences": "Incremento estimado de 30% en storage. Pipeline de materialización requerido.",
         },
     },
     {
@@ -65,11 +68,11 @@ SEED_DOCS = [
         "title": "RFC-001 — Orquestación: MWAA vs Prefect vs Dagster",
         "author": "fgarcia", "domain": "Orchestration",
         "sections": {
-            "problem": "Necesitamos una plataforma de orquestación para los pipelines de datos. La decisión afecta a plataforma (infra, IAM) y a arquitectura de datos (contratos, SLAs). Zona gris de ownership.",
-            "proposal": "MWAA (Managed Airflow) como opción principal: menor curva de adopción, soporte nativo AWS, alineado con el stack actual.",
-            "alternatives": "Prefect Cloud: mejor DX, más caro, dependencia SaaS externa.\nDagster: excelente para data assets, menos maduro en el banco.",
-            "open_questions": "1. ¿Plataforma puede operar MWAA o necesitamos soporte de un tercero?\n2. ¿El modelo de costos de MWAA escala con nuestro volumen de DAGs?\n3. ¿Secrets management via SSM o Vault?",
-            "stakeholders": "Plataforma: Carlos Ruiz, equipo infra\nArquitectura de Datos: Fernando García\nSeguridad: pendiente designar",
+            "problem": "Necesitamos una plataforma de orquestación para los pipelines de datos.",
+            "proposal": "MWAA (Managed Airflow) como opción principal.",
+            "alternatives": "Prefect Cloud, Dagster.",
+            "open_questions": "1. ¿Plataforma puede operar MWAA?\n2. ¿Modelo de costos escala?",
+            "stakeholders": "Arquitectura de Datos: Fernando García\nPlataforma: Carlos Ruiz",
         },
     },
     {
@@ -83,9 +86,9 @@ SEED_DOCS = [
         "title": "CapReq-001 — Cluster EMR Serverless para procesamiento Silver",
         "author": "lmartinez", "domain": "Infrastructure",
         "sections": {
-            "service": "EMR Serverless cluster para procesamiento Spark de capa Silver. Configuración: 200 vCPU máximo, 800GB RAM, acceso a S3 Bronze y Silver buckets.",
+            "service": "EMR Serverless cluster: 200 vCPU máximo, 800GB RAM, acceso a S3 Bronze y Silver.",
             "hld_ref": "HLD — Arquitectura Medallion (doc-001)",
-            "slas": "Disponibilidad: 99.5%\nLatencia de start: <2min para jobs cold start\nThroughput: 50GB/h procesamiento",
+            "slas": "Disponibilidad: 99.5%\nLatencia de start: <2min\nThroughput: 50GB/h",
         },
     },
     {
@@ -93,7 +96,7 @@ SEED_DOCS = [
         "title": "HLD — Ingesta en tiempo real (Kinesis + dlt)",
         "author": "lmartinez", "domain": "Ingestion",
         "sections": {
-            "context": "Diseño para ingesta de eventos en tiempo real desde sistemas transaccionales del banco hacia Bronze layer.",
+            "context": "Diseño para ingesta de eventos en tiempo real.",
         },
     },
     {
@@ -101,8 +104,8 @@ SEED_DOCS = [
         "title": "RACI — Data Platform v1.2",
         "author": "fgarcia", "domain": "Governance",
         "sections": {
-            "scope": "RACI para la plataforma de datos del banco. Cubre las capas Bronze, Silver, Gold y Platinum, así como herramientas transversales (orquestación, observabilidad, catálogo).",
-            "layers": "Bronze Layer (Raw):\n  R = Data Engineering\n  A = Arquitectura de Datos\n  C = Plataforma\n  I = Tech Lead, Compliance\n\nSilver Layer (Cleaned):\n  R = Data Engineering\n  A = Arquitectura de Datos\n  C = Plataforma\n  I = Tech Lead\n\nGold Layer (Modeled):\n  R = Data Engineering\n  A = Tech Lead\n  C = Arquitectura de Datos\n  I = Stakeholders de negocio\n\nPlatinum Layer (Serving):\n  R = Data Engineering\n  A = Tech Lead\n  C = Arquitectura de Datos, Plataforma\n  I = Producto",
+            "scope": "RACI para la plataforma de datos del banco.",
+            "layers": "Bronze Layer (Raw): R = Data Eng, A = Arq Datos, C = Plataforma\nSilver: R = Data Eng, A = Arq Datos\nGold: R = Data Eng, A = Tech Lead\nPlatinum: R = Data Eng, A = Tech Lead",
         },
     },
 ]
@@ -116,10 +119,16 @@ def run_seed(db: Session) -> None:
     users_by_username: dict[str, User] = {}
 
     for username, name, role in SEED_USERS:
-        u = User(username=username, full_name=name, role=role, password_hash=pw_hash)
+        u = User(
+            username=username,
+            full_name=name,
+            role=role,
+            password_hash=pw_hash,
+            must_change_password=False,  # demo — no forzamos cambio en el seed
+        )
         db.add(u)
         users_by_username[username] = u
-    db.flush()  # para tener u.id
+    db.flush()
 
     now = datetime.now(timezone.utc)
     for d in SEED_DOCS:

@@ -4,6 +4,15 @@ Gobierno de decisiones técnicas y artefactos de arquitectura (HLD, ADR, RFC, Ca
 
 > Origen: prototipo construido en Claude Design + handoff bundle. Esta versión agrega BFF en Python/FastAPI, persistencia en PostgreSQL, RBAC server-side y audit log — lista para correr en Render como demo y trasladable a OCP sin cambios de código.
 
+## Novedades v1.1
+
+- **5 roles nuevos**: `arq_datos` (autor), `arq_lead` (aprueba), `tech_lead` (revisa, rechaza), `admin` (gestión usuarios + papelera), `dm` (read-only). El rol `plataforma` de v1 se migra automáticamente a `tech_lead`.
+- **Sección de Administración** (solo admin): gestión de usuarios, papelera de documentos, audit log consultable.
+- **Force-change-password**: cuando admin crea un usuario, genera una contraseña temporal (14 chars, expira 72h) que se muestra **una sola vez**. El usuario la usa para loguearse y queda bloqueado en una pantalla de cambio hasta que elija una propia.
+- **Soft delete de documentos**: admin puede eliminar y restaurar; los datos se conservan, solo admin ve la papelera.
+- **Audit log consultable**: ahora tiene UI con filtros por categoría (auth, docs, users, attachments).
+- **Migraciones Alembic**: primera migración (`0001_v2_admin`) corre automáticamente al arrancar (`AUTO_MIGRATE=true`). No tenés que tocar nada en Render.
+
 ## Arquitectura
 
 ```
@@ -51,14 +60,17 @@ arch-manager/
 └── render.yaml           # blueprint de Render (1-click deploy)
 ```
 
-## Roles y permisos (v1)
+## Roles y permisos (v1.1)
 
-| Rol           | Puede crear | Puede editar       | Transiciones que puede hacer                |
-| ------------- | :---------: | ------------------ | ------------------------------------------- |
-| `arq_datos`   | ✅          | docs propios       | Draft → In Review (si es autor)             |
-| `plataforma`  | ❌          | —                  | In Review → Draft (rechazo)                 |
-| `tech_lead`   | ❌          | —                  | In Review → Approved · Approved → Deprecated · In Review → Draft |
-| `admin`       | ✅          | cualquier doc      | cualquier transición                        |
+| Rol          | Crea docs | Edita contenido | Transiciones                               | Administración          |
+| ------------ | :-------: | --------------- | ------------------------------------------ | ----------------------- |
+| `arq_datos`  | ✅         | solo docs propios | Draft → In Review (si es autor)           | —                       |
+| `arq_lead`   | ❌         | —               | In Review → Approved · Approved → Deprecated · In Review → Draft | — |
+| `tech_lead`  | ❌         | —               | In Review → Draft (rechazo)                | —                       |
+| `dm`         | ❌         | —               | —                                          | —                       |
+| `admin`      | ❌         | —               | —                                          | Usuarios + Papelera + Audit |
+
+**Nota sobre admin**: admin **no** edita contenido técnico de los documentos (eso es responsabilidad del autor). Solo gestiona usuarios, borra/restaura y ve el audit log. Si querés dar permisos de aprobación o edición, asigná `arq_lead` o `arq_datos`.
 
 ## Quickstart local
 
@@ -194,31 +206,42 @@ Cuando llegue la migración OCP → ECS:
 
 Todos con password `galicia123` (configurable via `SEED_DEFAULT_PASSWORD`):
 
-| Usuario     | Rol         | Puede                                            |
-| ----------- | ----------- | ------------------------------------------------ |
-| `fgarcia`   | arq_datos   | Crear y editar docs propios, mandarlos a review |
-| `lmartinez` | arq_datos   | Idem                                             |
-| `cruiz`     | plataforma  | Rechazar docs en review                         |
-| `tlead`     | tech_lead   | Aprobar y deprecar                              |
-| `admin`     | admin       | Todo                                             |
+| Usuario     | Rol         | Puede                                                |
+| ----------- | ----------- | ---------------------------------------------------- |
+| `fgarcia`   | arq_datos   | Crear y editar docs propios, mandarlos a review      |
+| `lmartinez` | arq_datos   | Idem                                                 |
+| `alead`     | arq_lead    | Aprobar docs en review · Deprecar · Rechazar         |
+| `tlead`     | tech_lead   | Rechazar docs en review                              |
+| `dmanager`  | dm          | Solo lectura (stakeholder informado)                 |
+| `admin`     | admin       | Gestión de usuarios · Papelera · Audit log           |
 
 ## Endpoints
 
-| Método | Path                                       | Auth | Descripción                       |
-| ------ | ------------------------------------------ | ---- | --------------------------------- |
-| GET    | `/healthz`                                 | —    | Liveness                          |
-| GET    | `/readyz`                                  | —    | Readiness (chequea DB)            |
-| POST   | `/api/auth/login`                          | —    | Login (crea sesión)               |
-| POST   | `/api/auth/logout`                         | ✅   | Cierra sesión                     |
-| GET    | `/api/auth/me`                             | ✅   | Usuario actual + permisos         |
-| GET    | `/api/docs`                                | ✅   | Lista de docs                     |
-| GET    | `/api/docs/{id}`                           | ✅   | Doc individual + adjuntos         |
-| POST   | `/api/docs`                                | ✅   | Crear doc (RBAC: `doc.create`)    |
-| PUT    | `/api/docs/{id}`                           | ✅   | Editar (RBAC: autor o admin)      |
-| POST   | `/api/docs/{id}/transition`                | ✅   | Cambiar estado                    |
-| POST   | `/api/docs/{id}/attachments`               | ✅   | Subir adjunto (multipart, 8MB max)|
-| GET    | `/api/attachments/{id}`                    | ✅   | Stream del adjunto                |
-| DELETE | `/api/attachments/{id}`                    | ✅   | Eliminar adjunto                  |
+| Método | Path                                       | Auth  | Descripción                                          |
+| ------ | ------------------------------------------ | ----- | ---------------------------------------------------- |
+| GET    | `/healthz`                                 | —     | Liveness                                             |
+| GET    | `/readyz`                                  | —     | Readiness (chequea DB)                               |
+| POST   | `/api/auth/login`                          | —     | Login (crea sesión)                                  |
+| POST   | `/api/auth/logout`                         | ✅    | Cierra sesión                                        |
+| GET    | `/api/auth/me`                             | ✅    | Usuario actual + permisos + flag must_change_password |
+| POST   | `/api/auth/change-password`                | ✅    | Cambiar propia contraseña (invalida otras sesiones)  |
+| GET    | `/api/docs?only_deleted=true`              | ✅    | Lista de docs (admin: `only_deleted` para papelera)  |
+| GET    | `/api/docs/{id}`                           | ✅    | Doc individual + adjuntos                            |
+| POST   | `/api/docs`                                | ✅    | Crear doc (RBAC: `arq_datos` o `admin`)              |
+| PUT    | `/api/docs/{id}`                           | ✅    | Editar contenido (solo autor)                        |
+| POST   | `/api/docs/{id}/transition`                | ✅    | Cambiar estado                                       |
+| DELETE | `/api/docs/{id}`                           | admin | Soft delete                                          |
+| POST   | `/api/docs/{id}/restore`                   | admin | Restaurar doc borrado                                |
+| POST   | `/api/docs/{id}/attachments`               | ✅    | Subir adjunto (multipart, 8MB max)                   |
+| GET    | `/api/attachments/{id}`                    | ✅    | Stream del adjunto                                   |
+| DELETE | `/api/attachments/{id}`                    | ✅    | Eliminar adjunto                                     |
+| GET    | `/api/users`                               | admin | Lista usuarios                                       |
+| POST   | `/api/users`                               | admin | Crear usuario (devuelve temp password una sola vez)  |
+| GET    | `/api/users/{id}`                          | admin | Detalle                                              |
+| PATCH  | `/api/users/{id}`                          | admin | Editar rol / nombre / activar-desactivar             |
+| POST   | `/api/users/{id}/reset-password`           | admin | Generar nueva temp password                          |
+| DELETE | `/api/users/{id}`                          | admin | Desactivar usuario (soft)                            |
+| GET    | `/api/audit?action=&doc_id=&actor_id=`     | admin | Audit log consultable                                |
 
 OpenAPI interactiva: `/docs` (FastAPI Swagger UI, deshabilitar en prod si es necesario).
 

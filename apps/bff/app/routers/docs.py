@@ -1,17 +1,23 @@
 """
-Router de documentos: list / get / create / update / transition.
-RBAC enforced en cada endpoint vía dependencies + checks por doc.
+Router de documentos v2 — CRUD + soft delete + restore.
+
+Cambios vs v1:
+  - list_docs ahora excluye soft-deleted por default; admin puede pedir
+    ?include_deleted=true o ?only_deleted=true para la papelera.
+  - get_doc devuelve 404 para docs soft-deleted a no-admins.
+  - DELETE /{id}       → admin: marca deleted_at (soft)
+  - POST   /{id}/restore → admin: limpia deleted_at
 """
 from datetime import datetime, timezone
 from typing import Annotated
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.audit import log as audit_log
-from app.auth import current_user, require_perm
+from app.auth import current_user, require_admin, require_perm
 from app.database import get_db
 from app.models import Document, User
 from app.rbac import can_edit_doc, can_transition
@@ -34,39 +40,58 @@ def _doc_to_out(doc: Document) -> DocOut:
         title=doc.title,
         domain=doc.domain or "",
         author=doc.author_name,
+        author_id=doc.author_id,
         sections=doc.sections or {},
         createdAt=doc.created_at.date().isoformat(),
         updatedAt=doc.updated_at.date().isoformat(),
         attachments=[
             AttachmentOut(
-                id=a.id,
-                name=a.filename,
-                mime=a.mime,
-                size=a.size_bytes,
+                id=a.id, name=a.filename, mime=a.mime, size=a.size_bytes,
                 url=f"/api/attachments/{a.id}",
             )
             for a in doc.attachments
+            if a.deleted_at is None
         ],
+        deleted_at=doc.deleted_at,
     )
 
 
 @router.get("", response_model=list[DocOut])
 def list_docs(
-    _user: Annotated[User, Depends(current_user)],
+    user: Annotated[User, Depends(current_user)],
+    include_deleted: bool = Query(False, description="Admin: incluir soft-deleted"),
+    only_deleted: bool = Query(False, description="Admin: solo soft-deleted (papelera)"),
     db: Session = Depends(get_db),
 ) -> list[DocOut]:
-    rows = db.query(Document).order_by(desc(Document.updated_at)).all()
+    q = db.query(Document)
+
+    is_admin = user.role == "admin"
+    if only_deleted:
+        if not is_admin:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo admins ven la papelera")
+        q = q.filter(Document.deleted_at.isnot(None))
+    elif include_deleted:
+        if not is_admin:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "Solo admins ven documentos borrados")
+        # sin filtro → devolver todo
+    else:
+        q = q.filter(Document.deleted_at.is_(None))
+
+    rows = q.order_by(desc(Document.updated_at)).all()
     return [_doc_to_out(d) for d in rows]
 
 
 @router.get("/{doc_id}", response_model=DocOut)
 def get_doc(
     doc_id: str,
-    _user: Annotated[User, Depends(current_user)],
+    user: Annotated[User, Depends(current_user)],
     db: Session = Depends(get_db),
 ) -> DocOut:
     doc = db.query(Document).filter(Document.id == doc_id).one_or_none()
     if not doc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Documento no encontrado")
+    # No-admin no ve soft-deleted
+    if doc.deleted_at is not None and user.role != "admin":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Documento no encontrado")
     return _doc_to_out(doc)
 
@@ -108,6 +133,8 @@ def update_doc(
     doc = db.query(Document).filter(Document.id == doc_id).one_or_none()
     if not doc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Documento no encontrado")
+    if doc.deleted_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "El documento está borrado; restauralo antes de editar")
 
     if not can_edit_doc(user.role, user.id, doc.author_id):  # type: ignore[arg-type]
         raise HTTPException(status.HTTP_403_FORBIDDEN, "No podés editar este documento")
@@ -142,10 +169,11 @@ def transition_doc(
     doc = db.query(Document).filter(Document.id == doc_id).one_or_none()
     if not doc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Documento no encontrado")
+    if doc.deleted_at is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "El documento está borrado")
 
     from_status = doc.status  # type: ignore[assignment]
     to_status = payload.to
-
     if from_status == to_status:
         return _doc_to_out(doc)
 
@@ -159,6 +187,47 @@ def transition_doc(
     doc.updated_at = datetime.now(timezone.utc)
     audit_log(db, actor=user, action="doc.transition", doc_id=doc.id,
               detail=f"{from_status} -> {to_status}")
+    db.commit()
+    db.refresh(doc)
+    return _doc_to_out(doc)
+
+
+@router.delete("/{doc_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_doc(
+    doc_id: str,
+    admin: Annotated[User, Depends(require_admin)],
+    db: Session = Depends(get_db),
+) -> None:
+    """Soft delete — admin-only. Marca deleted_at; no se pierden datos."""
+    doc = db.query(Document).filter(Document.id == doc_id).one_or_none()
+    if not doc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Documento no encontrado")
+    if doc.deleted_at is not None:
+        return  # ya está borrado, idempotente
+
+    doc.deleted_at = datetime.now(timezone.utc)
+    audit_log(db, actor=admin, action="doc.delete", doc_id=doc.id,
+              detail=f"title={doc.title!r}")
+    db.commit()
+
+
+@router.post("/{doc_id}/restore", response_model=DocOut)
+def restore_doc(
+    doc_id: str,
+    admin: Annotated[User, Depends(require_admin)],
+    db: Session = Depends(get_db),
+) -> DocOut:
+    """Admin: limpia deleted_at — el doc vuelve a estar activo."""
+    doc = db.query(Document).filter(Document.id == doc_id).one_or_none()
+    if not doc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Documento no encontrado")
+    if doc.deleted_at is None:
+        return _doc_to_out(doc)  # ya activo, idempotente
+
+    doc.deleted_at = None
+    doc.updated_at = datetime.now(timezone.utc)
+    audit_log(db, actor=admin, action="doc.restore", doc_id=doc.id,
+              detail=f"title={doc.title!r}")
     db.commit()
     db.refresh(doc)
     return _doc_to_out(doc)

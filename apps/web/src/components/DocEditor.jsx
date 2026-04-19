@@ -13,7 +13,7 @@ const NEXT_STATUS = {
   'Deprecated': [],
 }
 
-export function DocDetail({ doc, onBack, onUpdated, currentUser }) {
+export function DocDetail({ doc, onBack, onUpdated, onDeleted, currentUser }) {
   const [isEditing, setIsEditing] = useState(false)
   const [form, setForm]           = useState(() => normalize(doc))
   const [saved, setSaved]         = useState(false)
@@ -26,8 +26,34 @@ export function DocDetail({ doc, onBack, onUpdated, currentUser }) {
   const template = ARTIFACT_TEMPLATES[doc.type]
   const sections = template?.sections || []
 
-  const canEdit = currentUser?.role === 'admin'
-                 || (currentUser?.role === 'arq_datos' && currentUser?.name === doc.author)
+  // v2: admin NO edita contenido técnico; solo el autor.
+  const canEdit = currentUser?.role === 'arq_datos' && currentUser?.id === doc.author_id
+  const canDelete  = currentUser?.role === 'admin' && !doc.deleted_at
+  const canRestore = currentUser?.role === 'admin' &&  doc.deleted_at
+  const isDeleted  = !!doc.deleted_at
+
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+
+  const handleDelete = async () => {
+    setDeleting(true)
+    try {
+      await docsApi.delete(doc.id)
+      onDeleted?.(doc.id)
+    } catch (err) {
+      setError(err.message || 'No se pudo eliminar')
+      setDeleting(false)
+    }
+  }
+
+  const handleRestoreDoc = async () => {
+    try {
+      const restored = await docsApi.restore(doc.id)
+      onUpdated(restored)
+    } catch (err) {
+      setError(err.message || 'No se pudo restaurar')
+    }
+  }
 
   const handleSave = async () => {
     setSaving(true)
@@ -111,12 +137,27 @@ export function DocDetail({ doc, onBack, onUpdated, currentUser }) {
             style={{ background: 'none', border: '1px solid rgba(0,0,0,0.13)', borderRadius: 7, padding: '6px 12px', fontSize: 11, cursor: 'pointer', color: '#6B7280', fontWeight: 600 }}
           >↓ Markdown</button>
           {!isEditing ? (
-            canEdit && (
-              <button
-                onClick={() => setIsEditing(true)}
-                style={{ background: 'none', border: '1px solid rgba(0,0,0,0.15)', borderRadius: 7, padding: '6px 14px', fontSize: 12, fontWeight: 700, cursor: 'pointer', color: '#374151' }}
-              >Editar</button>
-            )
+            <>
+              {canEdit && !isDeleted && (
+                <button
+                  onClick={() => setIsEditing(true)}
+                  style={{ background: 'none', border: '1px solid rgba(0,0,0,0.15)', borderRadius: 7, padding: '6px 14px', fontSize: 12, fontWeight: 700, cursor: 'pointer', color: '#374151' }}
+                >Editar</button>
+              )}
+              {canDelete && (
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  title="Eliminar (soft delete)"
+                  style={{ background: 'none', border: '1px solid rgba(228,0,43,0.25)', borderRadius: 7, padding: '6px 14px', fontSize: 12, fontWeight: 700, cursor: 'pointer', color: '#E4002B' }}
+                >Eliminar</button>
+              )}
+              {canRestore && (
+                <button
+                  onClick={handleRestoreDoc}
+                  style={{ background: '#059669', border: 'none', borderRadius: 7, padding: '6px 14px', fontSize: 12, fontWeight: 800, cursor: 'pointer', color: '#fff' }}
+                >Restaurar</button>
+              )}
+            </>
           ) : (
             <>
               <button
@@ -137,6 +178,27 @@ export function DocDetail({ doc, onBack, onUpdated, currentUser }) {
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
 
         <div style={{ flex: 1, overflowY: 'auto', padding: '28px 36px' }}>
+
+          {isDeleted && (
+            <div style={{ background: 'rgba(228,0,43,0.06)',
+                          border: '1px solid rgba(228,0,43,0.22)',
+                          borderRadius: 10, padding: '12px 16px', marginBottom: 20,
+                          display: 'flex', alignItems: 'center', gap: 10 }}>
+              <svg width="16" height="16" fill="none" stroke="#E4002B" strokeWidth="2.2" viewBox="0 0 24 24">
+                <polyline points="3 6 5 6 21 6"/>
+                <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/>
+              </svg>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: '#991B1B' }}>
+                  Documento eliminado
+                </div>
+                <div style={{ fontSize: 11, color: '#9B2C2C', marginTop: 2 }}>
+                  Eliminado el {new Date(doc.deleted_at).toLocaleString('es-AR')}.
+                  Los datos se conservan — podés restaurarlo desde acá o desde la papelera.
+                </div>
+              </div>
+            </div>
+          )}
 
           <div style={{ marginBottom: 24, paddingBottom: 20, borderBottom: '1px solid rgba(0,0,0,0.07)' }}>
             {isEditing ? (
@@ -260,6 +322,91 @@ export function DocDetail({ doc, onBack, onUpdated, currentUser }) {
               <code style={{ fontSize: 10, color: '#6B7280', background: '#F3F4F6', padding: '2px 6px', borderRadius: 4 }}>{form.id}</code>
             </div>
           </div>
+        </div>
+      </div>
+
+      {showDeleteConfirm && (
+        <DeleteConfirmModal
+          doc={doc}
+          onCancel={() => setShowDeleteConfirm(false)}
+          onConfirm={handleDelete}
+          deleting={deleting}
+        />
+      )}
+    </div>
+  )
+}
+
+function DeleteConfirmModal({ doc, onCancel, onConfirm, deleting }) {
+  const [typed, setTyped] = useState('')
+  const matches = typed === doc.id
+  return (
+    <div onClick={onCancel}
+         style={{ position: 'fixed', inset: 0, background: 'rgba(13,15,20,0.55)',
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  zIndex: 1000, backdropFilter: 'blur(2px)' }}>
+      <div onClick={e => e.stopPropagation()}
+           style={{ background: '#fff', borderRadius: 16, padding: 28,
+                    width: 460, maxWidth: '92vw',
+                    boxShadow: '0 32px 72px rgba(0,0,0,0.22)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16 }}>
+          <div style={{ width: 36, height: 36, borderRadius: '50%',
+                        background: 'rgba(228,0,43,0.1)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <svg width="16" height="16" fill="none" stroke="#E4002B" strokeWidth="2.2" viewBox="0 0 24 24">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6l-2 14a2 2 0 0 1-2 2H9a2 2 0 0 1-2-2L5 6"/>
+              <path d="M10 11v6M14 11v6"/>
+            </svg>
+          </div>
+          <div style={{ fontSize: 17, fontWeight: 900, color: '#0D0F14',
+                        fontFamily: 'Outfit, sans-serif', letterSpacing: '-0.02em' }}>
+            Eliminar documento
+          </div>
+        </div>
+
+        <div style={{ fontSize: 13, color: '#374151', lineHeight: 1.55, marginBottom: 14 }}>
+          Vas a eliminar <b>{doc.title}</b>. El documento se mueve a la papelera —
+          los datos se conservan y podés restaurarlo más tarde.
+        </div>
+
+        <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 6 }}>
+          Para confirmar, escribí el ID del documento:
+        </div>
+        <code style={{ display: 'inline-block', background: '#F3F4F6',
+                       padding: '3px 8px', borderRadius: 5, fontSize: 11,
+                       color: '#0D0F14', marginBottom: 10 }}>
+          {doc.id}
+        </code>
+        <input value={typed}
+               onChange={e => setTyped(e.target.value)}
+               placeholder={doc.id}
+               style={{ width: '100%', height: 40,
+                        border: '1px solid rgba(0,0,0,0.14)', borderRadius: 8,
+                        padding: '0 12px', fontSize: 13, background: '#FAFAF8',
+                        outline: 'none', boxSizing: 'border-box',
+                        fontFamily: 'monospace', color: '#111827' }}
+               autoFocus />
+
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8,
+                      marginTop: 22, paddingTop: 16,
+                      borderTop: '1px solid rgba(0,0,0,0.07)' }}>
+          <button onClick={onCancel} disabled={deleting}
+                  style={{ background: 'none', border: '1px solid rgba(0,0,0,0.13)',
+                           borderRadius: 7, padding: '8px 16px', fontSize: 13,
+                           cursor: 'pointer', color: '#374151' }}>
+            Cancelar
+          </button>
+          <button onClick={onConfirm} disabled={!matches || deleting}
+                  style={{
+                    background: matches && !deleting ? '#E4002B' : '#E5E7EB',
+                    border: 'none', borderRadius: 7, padding: '8px 22px',
+                    fontSize: 13, fontWeight: 800,
+                    cursor: matches && !deleting ? 'pointer' : 'default',
+                    color: matches && !deleting ? '#fff' : '#9CA3AF',
+                  }}>
+            {deleting ? 'Eliminando…' : 'Eliminar'}
+          </button>
         </div>
       </div>
     </div>

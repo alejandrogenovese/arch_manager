@@ -1,8 +1,4 @@
-// api.js — cliente HTTP del BFF.
-//
-// Todas las llamadas usan `credentials: 'include'` para que la cookie
-// HttpOnly de sesión viaje. NO leemos ni escribimos tokens en el cliente
-// (eso es justamente el punto del patrón BFF).
+// api.js v2 — cliente HTTP del BFF.
 
 const BASE = '/api'
 
@@ -14,29 +10,24 @@ class ApiError extends Error {
   }
 }
 
-async function request(path, { method = 'GET', body, headers = {}, isForm = false } = {}) {
-  const opts = {
-    method,
-    credentials: 'include',
-    headers: { ...headers },
-  }
+async function request(path, { method = 'GET', body, headers = {}, isForm = false, query } = {}) {
+  const opts = { method, credentials: 'include', headers: { ...headers } }
   if (body !== undefined) {
-    if (isForm) {
-      opts.body = body  // FormData
-    } else {
+    if (isForm) opts.body = body
+    else {
       opts.headers['Content-Type'] = 'application/json'
       opts.body = JSON.stringify(body)
     }
   }
-  const res = await fetch(`${BASE}${path}`, opts)
-  if (res.status === 204) return null
-  let payload = null
-  const contentType = res.headers.get('content-type') || ''
-  if (contentType.includes('application/json')) {
-    payload = await res.json()
-  } else {
-    payload = await res.text()
+  let url = `${BASE}${path}`
+  if (query) {
+    const qs = new URLSearchParams(Object.entries(query).filter(([, v]) => v !== undefined && v !== null && v !== '')).toString()
+    if (qs) url += `?${qs}`
   }
+  const res = await fetch(url, opts)
+  if (res.status === 204) return null
+  const ct = res.headers.get('content-type') || ''
+  const payload = ct.includes('application/json') ? await res.json() : await res.text()
   if (!res.ok) {
     const msg = payload?.detail || payload?.message || res.statusText || 'Error'
     throw new ApiError(res.status, msg, payload)
@@ -44,23 +35,24 @@ async function request(path, { method = 'GET', body, headers = {}, isForm = fals
   return payload
 }
 
-// ─── Auth ────────────────────────────────────────────────────────────────────
 export const auth = {
-  login:  (user, pass) => request('/auth/login', { method: 'POST', body: { user, pass } }),
-  logout: ()           => request('/auth/logout', { method: 'POST' }),
-  me:     ()           => request('/auth/me'),
+  login:          (user, pass)           => request('/auth/login',  { method: 'POST', body: { user, pass } }),
+  logout:         ()                     => request('/auth/logout', { method: 'POST' }),
+  me:             ()                     => request('/auth/me'),
+  changePassword: (currentPassword, newPassword) =>
+    request('/auth/change-password', { method: 'POST', body: { current_password: currentPassword, new_password: newPassword } }),
 }
 
-// ─── Docs ────────────────────────────────────────────────────────────────────
 export const docs = {
-  list:       ()                       => request('/docs'),
-  get:        (id)                     => request(`/docs/${id}`),
-  create:     (payload)                => request('/docs', { method: 'POST', body: payload }),
-  update:     (id, payload)            => request(`/docs/${id}`,             { method: 'PUT',  body: payload }),
-  transition: (id, to)                 => request(`/docs/${id}/transition`,  { method: 'POST', body: { to } }),
+  list:       (opts = {})                  => request('/docs', { query: opts }),
+  get:        (id)                          => request(`/docs/${id}`),
+  create:     (payload)                     => request('/docs', { method: 'POST', body: payload }),
+  update:     (id, payload)                 => request(`/docs/${id}`, { method: 'PUT',  body: payload }),
+  transition: (id, to)                      => request(`/docs/${id}/transition`, { method: 'POST', body: { to } }),
+  delete:     (id)                          => request(`/docs/${id}`, { method: 'DELETE' }),
+  restore:    (id)                          => request(`/docs/${id}/restore`, { method: 'POST' }),
 }
 
-// ─── Attachments ────────────────────────────────────────────────────────────
 export const attachments = {
   upload: (docId, file) => {
     const fd = new FormData()
@@ -69,6 +61,19 @@ export const attachments = {
   },
   remove: (id) => request(`/attachments/${id}`, { method: 'DELETE' }),
   url:    (id) => `${BASE}/attachments/${id}`,
+}
+
+export const users = {
+  list:          ()          => request('/users'),
+  get:           (id)        => request(`/users/${id}`),
+  create:        (payload)   => request('/users', { method: 'POST', body: payload }),
+  update:        (id, p)     => request(`/users/${id}`, { method: 'PATCH', body: p }),
+  resetPassword: (id)        => request(`/users/${id}/reset-password`, { method: 'POST' }),
+  deactivate:    (id)        => request(`/users/${id}`, { method: 'DELETE' }),
+}
+
+export const audit = {
+  list: (opts = {}) => request('/audit', { query: opts }),
 }
 
 export { ApiError }
