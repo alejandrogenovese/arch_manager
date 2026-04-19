@@ -1,0 +1,75 @@
+---
+# NetworkPolicies — modelo deny-by-default + permitir lo que necesita.
+#
+# Política bancaria típica: el namespace empieza cerrado, y abrimos
+# explícitamente:
+#   - ingress desde el router de OCP (tráfico que entra por la Route)
+#   - egress al Postgres (asume PG en otro namespace con label pg=archmanager)
+#   - egress a DNS del cluster
+#
+# Para Entra ID hay que sumar egress 443/tcp a *.login.microsoftonline.com
+# (eso suele resolverse permitiendo egress a Internet con un FQDN policy o
+# saliendo por un proxy corporativo — depende del cluster).
+
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: arch-manager
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-from-router
+  namespace: arch-manager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: arch-manager
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              # En OCP los namespaces del router tienen este label.
+              network.openshift.io/policy-group: ingress
+      ports:
+        - protocol: TCP
+          port: 8000
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-egress-dns-and-pg
+  namespace: arch-manager
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: arch-manager
+  policyTypes: [Egress]
+  egress:
+    # DNS del cluster
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              dns.operator.openshift.io/daemonset-dns: default
+      ports:
+        - protocol: UDP
+          port: 5353
+        - protocol: TCP
+          port: 5353
+    # Postgres — ajustar selector al namespace y label reales del PG
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: data-platform-pg
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: arch-manager-pg
+      ports:
+        - protocol: TCP
+          port: 5432

@@ -1,0 +1,28 @@
+---
+# Route de OpenShift — equivalente a un Ingress, pero con TLS edge
+# terminado en el router (HAProxy de OCP).
+#
+# El cliente entra por HTTPS, el router termina TLS, y el tráfico interno
+# al pod va por HTTP plano. Cualquier request HTTP se redirige a HTTPS.
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: arch-manager
+  namespace: arch-manager
+  labels:
+    app.kubernetes.io/name: arch-manager
+  annotations:
+    # Limita el tamaño de upload a 10MB (adjuntos máx 8MB + headers).
+    haproxy.router.openshift.io/timeout: "60s"
+spec:
+  host: arch-manager.apps.<TU-CLUSTER-DOMAIN>     # reemplazar por el dominio real
+  to:
+    kind: Service
+    name: arch-manager
+    weight: 100
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None

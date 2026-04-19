@@ -1,0 +1,18 @@
+---
+# Configuración no-sensible. Cambia entre entornos (dev/prod) sin tocar
+# la imagen.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: arch-manager-config
+  namespace: arch-manager
+  labels:
+    app.kubernetes.io/name: arch-manager
+data:
+  ENV: "production"
+  LOG_LEVEL: "INFO"
+  SESSION_COOKIE_SECURE: "true"      # Route con TLS edge → cookie solo HTTPS
+  SESSION_MAX_AGE_HOURS: "8"
+  SEED_ON_STARTUP: "false"           # En prod las migraciones van por Alembic
+  SERVE_SPA: "true"
+  SPA_DIST_DIR: "/app/web_dist"

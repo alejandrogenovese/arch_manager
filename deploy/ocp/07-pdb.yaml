@@ -1,0 +1,13 @@
+---
+# PDB: garantiza que al menos 1 réplica quede arriba durante drains de nodos
+# o upgrades del cluster. Combinado con replicas=2 en el Deployment.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: arch-manager
+  namespace: arch-manager
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: arch-manager

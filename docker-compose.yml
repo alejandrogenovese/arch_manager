@@ -1,0 +1,46 @@
+# docker-compose para desarrollo local.
+#
+# Uso:
+#   docker compose up -d db        → solo Postgres (corres BFF y Vite a mano)
+#   docker compose up --build       → todo en contenedores (ya con SPA build)
+#
+# Para iterar el SPA: levantar `db` + correr BFF y Vite locales (Vite hace
+# proxy a :8000, ver vite.config.js).
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER:     archmanager
+      POSTGRES_PASSWORD: archmanager
+      POSTGRES_DB:       archmanager
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U archmanager"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENV: development
+      DATABASE_URL: postgresql+psycopg://archmanager:archmanager@db:5432/archmanager
+      SESSION_SECRET: local-dev-secret-do-not-use-in-prod-32-chars
+      SESSION_COOKIE_SECURE: "false"
+      SEED_ON_STARTUP: "true"
+      SEED_DEFAULT_PASSWORD: galicia123
+      SERVE_SPA: "true"
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:

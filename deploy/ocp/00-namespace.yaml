@@ -1,0 +1,10 @@
+---
+# Namespace dedicado. En OCP es buena práctica tener un Project con
+# labels claros para network policies y quotas.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: arch-manager
+  labels:
+    app.kubernetes.io/name: arch-manager
+    app.kubernetes.io/part-of: data-platform

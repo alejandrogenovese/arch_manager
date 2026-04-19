@@ -1,0 +1,55 @@
+# Render Blueprint — 1-click deploy.
+# Crea: 1 web service (Docker) + 1 Postgres managed.
+#
+# Pasos:
+#   1) Pushear este repo a GitHub.
+#   2) En Render → New → Blueprint → seleccionar el repo.
+#   3) Render lee este archivo y crea ambos recursos.
+#
+# Importante:
+#   - SESSION_SECRET se genera SOLO la primera vez (`generateValue: true`).
+#     Si lo cambiás, todas las sesiones activas quedan inválidas.
+#   - DATABASE_URL viene del Postgres managed automáticamente.
+#   - SESSION_COOKIE_SECURE=true → la cookie solo viaja por HTTPS (Render lo da).
+#   - SEED_ON_STARTUP=true → seedea los 9 docs y 5 usuarios la primera vez.
+#     Para producción real → poner en false después del primer arranque.
+
+services:
+  - type: web
+    name: arch-manager
+    runtime: docker
+    plan: free                       # subir a starter ($) si necesitás siempre on
+    region: oregon                   # cambiar a la región más cercana si querés
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz
+    envVars:
+      - key: ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: SESSION_SECRET
+        generateValue: true          # Render genera un secreto único una sola vez
+      - key: SESSION_COOKIE_SECURE
+        value: "true"
+      - key: SESSION_MAX_AGE_HOURS
+        value: "8"
+      - key: SEED_ON_STARTUP
+        value: "true"
+      - key: SEED_DEFAULT_PASSWORD
+        sync: false                  # poner valor en el dashboard de Render
+      - key: SERVE_SPA
+        value: "true"
+      - key: SPA_DIST_DIR
+        value: /app/web_dist
+      - key: DATABASE_URL
+        fromDatabase:
+          name: arch-manager-db
+          property: connectionString
+
+databases:
+  - name: arch-manager-db
+    plan: free                       # 1GB, suficiente para demo
+    databaseName: archmanager
+    user: archmanager
+    region: oregon
+    postgresMajorVersion: 16
